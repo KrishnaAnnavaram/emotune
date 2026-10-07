@@ -1,0 +1,32 @@
+# Models for the benchmark. Pin `revision` to a commit hash before you publish a result.
+# A comparison must use one kind only: all "instruct" or all "base".
+
+[[models]]
+name = "mistral-7b-instruct"
+model_id = "mistralai/Mistral-7B-Instruct-v0.3"
+revision = "main"
+kind = "instruct"
+
+[[models]]
+name = "llama-3.1-8b-instruct"
+model_id = "meta-llama/Llama-3.1-8B-Instruct"
+revision = "main"
+kind = "instruct"
+
+[[models]]
+name = "qwen2.5-7b-instruct"
+model_id = "Qwen/Qwen2.5-7B-Instruct"
+revision = "main"
+kind = "instruct"
+
+[[models]]
+name = "mistral-7b-base"
+model_id = "mistralai/Mistral-7B-v0.3"
+revision = "main"
+kind = "base"
+
+[[models]]
+name = "llama-3.1-8b-base"
+model_id = "meta-llama/Llama-3.1-8B"
+revision = "main"
+kind = "base"
