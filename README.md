@@ -9,7 +9,7 @@
 ![Labels](https://img.shields.io/badge/Labels-6-1F3864?style=for-the-badge)
 ![Regimes](https://img.shields.io/badge/Regimes-baseline_%7C_zero--shot_%7C_few--shot_%7C_LoRA-2E5FD9?style=for-the-badge)
 ![Decoding](https://img.shields.io/badge/Decoding-label_scoring_%7C_greedy-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-43_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-41_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -102,7 +102,7 @@ emotune gives each question its own rule, its own code and its own tests.
 | Providers | Hugging Face models (extra `hf`), LoRA with PEFT (extra `finetune`), any OpenAI-compatible endpoint, YouTube Data API. All optional |
 | Offline mode | Synthetic data, the keyword and TF-IDF baselines, the simulated chat model |
 | Safety | Keys from the environment only, a key scan test, YouTube text without author data |
-| Tests | **43** unit tests (`pytest`). In CI, 41 pass and 2 skip (torch) |
+| Tests | **43** unit tests (`pytest`). In CI, 41 pass and 2 skip because the `torch` extra is not installed |
 
 ```mermaid
 flowchart LR
