@@ -65,6 +65,7 @@ This README is the **one location that explains all of emotune**. It gives these
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one item](#42-the-life-cycle-of-one-item)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Data and label schema](#5-data-and-label-schema)
 6. 🟢 [Classifiers and regimes](#6-classifiers-and-regimes)
 7. 🟣 [LoRA adapters](#7-lora-adapters)
@@ -130,6 +131,51 @@ flowchart LR
 | YouTube | `src/emotune/youtube.py` | Comment text collection without author data, labelling sample |
 | CLI | `src/emotune/cli.py` | The `emotune` command |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>emotune command"]
+    CFG["config.py<br/>load_dotenv, settings_from_env"]
+    subgraph DATAG["Data and label schema"]
+        LAB["labels.py<br/>LABELS, to_id, to_name"]
+        DAT["data.py<br/>load_splits, few_shot_sample,<br/>write_synthetic, download_hf"]
+        YT["youtube.py<br/>collect, label_sample"]
+    end
+    subgraph PROMPTG["Prompts and parser"]
+        PR["prompts.py<br/>zero_shot, few_shot, PROMPT_VERSION"]
+        PA["parse.py<br/>parse_label"]
+    end
+    subgraph BACK["backends/"]
+        BL["baselines.py<br/>KeywordBaseline, TfidfBaseline"]
+        CH["chat.py<br/>ChatClassifier, OpenAICompatibleLLM,<br/>SimulatedChatLLM"]
+        HF["hf.py<br/>HFLabelScorer, HFGreedyGenerator,<br/>extra hf"]
+    end
+    FT["finetune.py<br/>train_lora, extra finetune"]
+    MET["metrics.py<br/>classification_metrics,<br/>compare, agreement"]
+    RUN["runs.py<br/>RunConfig, save_run,<br/>check_like_for_like"]
+
+    CLI --> CFG
+    CLI --> DAT
+    CLI --> YT
+    CLI --> BL
+    CLI --> CH
+    CLI --> HF
+    CLI --> FT
+    CLI --> MET
+    CLI --> RUN
+    CH --> PR
+    CH --> PA
+    HF --> PR
+    HF --> PA
+    FT --> HF
+    FT --> PR
+    DAT --> LAB
+    PA --> LAB
+    MET --> LAB
+    BL --> LAB
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -165,6 +211,19 @@ emotune/
 ### 3.1 One label schema
 `labels.LABELS` is an ordered tuple in the `ClassLabel` order of `dair-ai/emotion`. Every module converts names and ids through it. `download` stops if the dataset order differs.
 
+```mermaid
+flowchart LR
+    HUB[/"dair-ai/emotion<br/>ClassLabel names"/] --> CHK{"download_hf:<br/>order equals LABELS?"}
+    L["labels.LABELS<br/>sadness, joy, love,<br/>anger, fear, surprise"] --> CHK
+    CHK -- "no" --> ERR[/"SchemaError"/]
+    CHK -- "yes" --> CSV[("train, validation, test CSV<br/>label ids 0 to 5")]
+    L --> P["prompts.SYSTEM:<br/>the six labels"]
+    L --> PA["parse_label:<br/>whole-word match"]
+    L --> M["metrics.to_ids:<br/>invalid is id 6"]
+    L --> FT["finetune:<br/>label tokens"]
+    L --> HF["HFLabelScorer:<br/>six label strings"]
+```
+
 ### 3.2 Strict parsing or label scoring
 The parser accepts an answer only if its first line holds exactly one label as a whole word. "enjoy" is not "joy", and "joy or sadness" is invalid. The label scorer ranks the six label strings by log-likelihood, so it cannot give an invalid answer.
 
@@ -186,6 +245,18 @@ Hugging Face runs use greedy decoding or label scoring, the chat template of the
 ### 3.8 Privacy and keys
 The YouTube collector keeps the comment text and a salted hash of the comment id only. Keys come from the environment or a local `.env` file. A test scans all tracked files for key patterns.
 
+```mermaid
+flowchart LR
+    V[/"video ids"/] --> K{"YOUTUBE_API_KEY and<br/>EMOTUNE_HASH_SALT set?"}
+    K -- "no" --> ERR[/"ValueError"/]
+    K -- "yes" --> API["commentThreads API:<br/>pages of up to 100,<br/>max_per_video"]
+    API --> KEEP["keep textDisplay only.<br/>No author, channel, date or likes"]
+    KEEP --> H["hashed_id: SHA-256 of salt<br/>and comment id, 16 characters"]
+    H --> D{"Empty text or<br/>duplicate id?"}
+    D -- "yes" --> SKIP["skip the comment"]
+    D -- "no" --> OUT[("comments.csv<br/>id, text")]
+```
+
 ---
 
 ## 4. The end-to-end workflow
@@ -193,24 +264,65 @@ The YouTube collector keeps the comment text and a salted hash of the comment id
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    DL["download or synth"] --> LOAD["load_splits: schema check, leak removal"]
+flowchart TD
+    DL{"download or synth"} -- "download" --> HUB[/"dair-ai/emotion<br/>at a pinned revision"/]
+    DL -- "synth" --> SYN["write_synthetic"]
+    HUB --> CSV[("train, validation, test CSV")]
+    SYN --> CSV
+    CSV --> LOAD["load_splits: schema check, leak removal"]
     LOAD --> BASE["baselines: keyword, TF-IDF"]
     LOAD --> ZS["zero-shot prompt"]
     LOAD --> FS["few-shot prompt (3 per label, seeded)"]
     LOAD --> FT["LoRA fine-tuning (completion-only loss)"]
-    ZS --> DEC["label scoring or greedy decoding"]
+    ZS --> DEC{"label scoring or greedy decoding"}
     FS --> DEC
-    FT --> AD["adapter"] --> DEC
-    DEC --> PAR["strict parser"]
+    FT --> AD[("adapter")] --> DEC
+    DEC -- "greedy" --> PAR["strict parser"]
+    DEC -- "label scoring" --> MET
     BASE --> MET["metrics: invalid = wrong, intervals"]
     PAR --> MET
-    MET --> RUN["run folder"]
+    MET --> RUN[("run folder")]
     RUN --> CMP["compare: McNemar + paired bootstrap"]
-    YT["YouTube text (no author data)"] --> PRED["predict with the adapter"] --> AGR["agreement, labelling sample"]
+    CMP --> RES[/"accuracy difference, interval, p-value"/]
+    YT[/"YouTube text (no author data)"/] --> PRED["predict with the adapter"] --> AGR["agreement, labelling sample"]
+    AD --> PRED
+    AGR --> HUMAN{{"HUMAN<br/>labels the sample"}}
+    HUMAN --> LBL[/"labelled sample for a later compare"/]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one item
+
+```mermaid
+stateDiagram-v2
+    state "CSV row" as Row
+    state "Example text and label" as Ex
+    state "Removed leaked row" as Removed
+    state "Prompt messages" as Prompt
+    state "Raw answer" as Raw
+    state "Six label scores" as Scores
+    state "Prediction" as Pred
+    state "Row in predictions.jsonl" as Saved
+    state "Paired with the other run" as Paired
+    [*] --> Row
+    Row --> SchemaError: empty text or label not in 0 to 5
+    Row --> Ex: load_csv
+    Ex --> Removed: train text also in validation or test
+    Ex --> Pred: baseline predict
+    Ex --> Prompt: zero_shot or few_shot
+    Prompt --> Scores: hf-score
+    Prompt --> Raw: greedy or chat model
+    Raw --> Pred: parse_label gives a label or invalid
+    Scores --> Pred: highest log-likelihood
+    Pred --> Saved: classification_metrics, save_run
+    Saved --> Paired: compare
+    Paired --> [*]
+    Saved --> [*]
+    Removed --> [*]
+    SchemaError --> [*]
+```
 
 1. `load_csv` reads the text and checks that the label is an integer in 0..5.
 2. `load_splits` removes the item from train if its text is also in validation or test.
@@ -221,11 +333,64 @@ flowchart TB
 7. `save_run` writes the item, the prediction and the raw answer to `predictions.jsonl`.
 8. `compare` pairs the item with the same item of another run.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as emotune CLI
+    participant D as data.py
+    participant C as Classifier
+    participant M as Model, HF or endpoint
+    participant P as parse_label
+    participant MET as metrics.py
+    participant FS as runs folder
+
+    R->>CLI: emotune llm --backend hf-greedy --regime few_shot
+    CLI->>CLI: load_dotenv, settings_from_env
+    CLI->>D: load_splits(data_dir)
+    D-->>CLI: splits and the count of removed rows
+    CLI->>D: few_shot_sample(train, 3, seed)
+    CLI->>C: make the classifier with the spec from models.toml
+    loop each test item
+        C->>M: chat-templated prompt, greedy, 6 new tokens
+        M-->>C: raw answer
+        C->>P: parse_label(raw)
+        P-->>C: label or invalid
+    end
+    C-->>CLI: predictions
+    CLI->>MET: classification_metrics(y, preds)
+    CLI->>FS: save_run: config.json, predictions.jsonl, metrics.json, report.md
+    CLI-->>R: accuracy, macro-F1, invalid rate
+    R->>CLI: emotune compare run_a run_b
+    CLI->>FS: load_predictions of both runs
+    CLI->>CLI: same items, labelled, check_like_for_like
+    CLI->>MET: compare: paired bootstrap and McNemar
+    CLI-->>R: accuracy difference and p-value
+```
+
 ---
 
 ## 5. Data and label schema
 
 **Purpose.** Give every classifier the same, checked items.
+
+```mermaid
+flowchart TD
+    DIR[/"data folder"/] --> LC["load_csv for train,<br/>validation and test"]
+    LC --> COL{"Columns text and label,<br/>text not empty,<br/>label an integer 0 to 5?"}
+    COL -- "no" --> ERR[/"SchemaError with file and line"/]
+    COL -- "yes" --> EX["lists of Example: text, label"]
+    EX --> HO["held-out texts:<br/>validation and test, case-folded"]
+    HO --> RM["remove each train item<br/>with a held-out text"]
+    RM --> OUT[/"splits + count of removed rows"/]
+    OUT --> FSQ{"Regime few_shot?"}
+    FSQ -- "yes" --> POOL{"k train items<br/>for each label?"}
+    POOL -- "no" --> VE[/"ValueError"/]
+    POOL -- "yes" --> PICK["seeded choice of k for each label,<br/>then a seeded shuffle"]
+    PICK --> SH[/"shots: 6 × k items"/]
+```
 
 | Input | Output |
 |---|---|
@@ -252,6 +417,30 @@ flowchart TB
 
 **Purpose.** Give one prediction for each item under one regime.
 
+The CLI selects the classifier from `--backend`, `--regime` and `--adapter`:
+
+```mermaid
+flowchart TD
+    A[/"--backend, --regime, --adapter"/] --> FSH{"Regime few_shot?"}
+    FSH -- "yes" --> SH["few_shot_sample:<br/>--shots for each label"]
+    B{"--backend"}
+    FSH -- "no" --> B
+    SH --> B
+    B -- "simulated" --> SIM["ChatClassifier +<br/>SimulatedChatLLM"]
+    B -- "openai" --> KEY{"Key set, or a<br/>local http URL?"}
+    KEY -- "no" --> EXIT[/"exit: set EMOTUNE_LLM_API_KEY"/]
+    KEY -- "yes" --> OAI["ChatClassifier +<br/>OpenAICompatibleLLM"]
+    B -- "hf-score or hf-greedy" --> SPEC["ModelSpec from<br/>configs/models.toml"]
+    SPEC --> AD{"--adapter?"}
+    AD -- "yes" --> LWA["load_with_adapter:<br/>base model + LoRA"]
+    AD -- "no" --> LD["load: pinned revision,<br/>NF4 with --load-in-4bit"]
+    KIND{"hf-score?"}
+    LWA --> KIND
+    LD --> KIND
+    KIND -- "yes" --> SC["HFLabelScorer,<br/>decoding label_likelihood"]
+    KIND -- "no" --> GR["HFGreedyGenerator,<br/>decoding greedy"]
+```
+
 | Classifier | Regime | Needs | Decoding |
 |---|---|---|---|
 | `KeywordBaseline` | `baseline` | nothing | lexicon counts. A tie or no match is `invalid` |
@@ -261,22 +450,85 @@ flowchart TB
 | `HFGreedyGenerator` | `zero_shot`, `few_shot`, `fine_tuned` | extra `hf` | greedy, at most 6 new tokens, strict parser |
 | `ChatClassifier` + `SimulatedChatLLM` | `zero_shot`, `few_shot` | nothing | seeded stand-in, marked `simulated` |
 
+The two baselines:
+
+```mermaid
+flowchart LR
+    T[/"texts"/] --> M{"--model"}
+    M -- "keyword" --> KW["count the LEXICON words<br/>of each label"]
+    KW --> TIE{"No match or a tie?"}
+    TIE -- "yes" --> INV[/"invalid"/]
+    TIE -- "no" --> TOP[/"label with the most words"/]
+    M -- "tfidf" --> FIT["fit on train only:<br/>TfidfVectorizer, words and bigrams,<br/>+ LogisticRegression C 4"]
+    FIT --> PROB["predict_proba,<br/>six label columns"]
+    PROB --> ARG[/"label with the highest probability"/]
+```
+
 **Procedure (chat classifier)**
 
 1. Build the messages: the system rule with the six labels, then the shots as user and assistant turns, then the text.
 2. Call the model. If the call fails, record the error as the answer and predict `invalid`.
 3. Parse the answer strictly.
 
+```mermaid
+flowchart LR
+    T[/"text"/] --> MSG{"regime"}
+    MSG -- "zero_shot" --> ZS["SYSTEM + one user turn:<br/>Text, then Label:"]
+    MSG -- "few_shot" --> FS["SYSTEM + each shot as a user<br/>and an assistant turn + text"]
+    ZS --> CALL["llm.complete<br/>OpenAI: temperature 0, max_tokens 5"]
+    FS --> CALL
+    CALL -- "exception" --> ERR["raw = error name"]
+    CALL -- "answer" --> RAW["raw answer"]
+    ERR --> P["parse_label"]
+    RAW --> P
+    P --> OUT[/"Prediction: label or invalid, raw"/]
+```
+
 **Rules**
 
 - The few-shot prompt shows each shot as a real exchange, so the answer format is shown, not only described.
 - The prompt version (`PROMPT_VERSION`) goes into every run config.
+
+The two Hugging Face classifiers:
+
+```mermaid
+flowchart TD
+    T[/"text and regime"/] --> MSG["zero_shot or few_shot messages"]
+    MSG --> TPL{"Tokenizer has<br/>a chat template?"}
+    TPL -- "yes" --> CT["apply_chat_template,<br/>add_generation_prompt"]
+    TPL -- "no" --> FL["flatten the messages"]
+    CT --> IDS["prompt token ids"]
+    FL --> IDS
+    IDS --> K{"classifier"}
+    K -- "HFLabelScorer" --> LP["label_logprobs: sum of log p<br/>of each label token after the prompt"]
+    LP --> BEST[/"label with the highest sum,<br/>never invalid"/]
+    K -- "HFGreedyGenerator" --> GEN["generate: do_sample false,<br/>max_new_tokens 6"]
+    GEN --> CUT["decode the new tokens only,<br/>cut by token position"]
+    CUT --> PARSE["parse_label"]
+    PARSE --> OUT[/"label or invalid, raw"/]
+```
 
 ---
 
 ## 7. LoRA adapters
 
 **Purpose.** Train a LoRA adapter that learns the label tokens only.
+
+```mermaid
+flowchart TD
+    SPEC[/"ModelSpec, train and<br/>validation items"/] --> LOAD["load: pinned revision,<br/>4-bit NF4 if load_in_4bit"]
+    LOAD --> KB{"load_in_4bit?"}
+    PEFT["get_peft_model: LoRA on q, k, v, o_proj,<br/>r 16, alpha 32, dropout 0.05"]
+    KB -- "yes" --> PREP["prepare_model_for_kbit_training"]
+    KB -- "no" --> PEFT
+    PREP --> PEFT
+    PEFT --> ENC["encode: chat-templated zero-shot prompt<br/>+ label tokens + EOS, build_example"]
+    ENC --> TR["Trainer: lr 2e-4, 2 epochs,<br/>batch 8, grad_accum 2, collate"]
+    TR --> EV["evaluate on validation<br/>after each epoch"]
+    EV --> BEST["load_best_model_at_end:<br/>lowest eval_loss"]
+    BEST --> SAVE[("runs/lora_model/adapter/<br/>LoRA weights + tokenizer")]
+    SAVE --> NEXT["emotune llm --backend hf-score<br/>--adapter folder"]
+```
 
 | Input | Output |
 |---|---|
@@ -292,11 +544,42 @@ flowchart TB
 6. Train with evaluation on validation after each epoch. Keep the epoch with the lowest validation loss.
 7. Evaluate with `emotune llm --backend hf-score --adapter <folder>`.
 
+The pure functions `build_example` and `collate` make the completion-only labels:
+
+```mermaid
+flowchart LR
+    P[/"prompt ids"/] --> R{"Prompt + label + EOS<br/>longer than max_length 256?"}
+    A[/"label ids + EOS"/] --> R
+    EX["input_ids: prompt + answer<br/>labels: -100 for the prompt, then the answer ids"]
+    R -- "yes" --> CUT["cut the prompt<br/>from the left"]
+    R -- "no" --> EX
+    CUT --> EX
+    EX --> COL["collate: pad to the longest<br/>example of the batch"]
+    COL --> PADL["padding: pad_id in input_ids,<br/>-100 in labels, 0 in attention_mask"]
+    PADL --> LOSS[/"loss on the label tokens<br/>and EOS only"/]
+```
+
 ---
 
 ## 8. The parsing, metric and comparison rules
 
 **Parser.**
+
+```mermaid
+flowchart TD
+    A[/"raw answer"/] --> E{"Empty after strip?"}
+    E -- "yes" --> INV[/"invalid"/]
+    E -- "no" --> FL["first line only,<br/>case-folded"]
+    FL --> W["words: runs of a to z"]
+    W --> NW{"Any word?"}
+    NW -- "no" --> INV
+    NW -- "yes" --> ONE{"Exactly one word,<br/>and it is a label?"}
+    ONE -- "yes" --> LAB[/"that label"/]
+    ONE -- "no" --> SET["set of the words that are labels,<br/>whole words only"]
+    SET --> CNT{"Exactly one<br/>distinct label?"}
+    CNT -- "yes" --> LAB
+    CNT -- "no" --> INV
+```
 
 | Answer | Prediction |
 |---|---|
@@ -308,6 +591,22 @@ flowchart TB
 
 **Metrics.**
 
+```mermaid
+flowchart LR
+    Y[/"true label ids"/] --> T["pair each item:<br/>to_ids, invalid is id 6"]
+    P[/"predicted labels"/] --> T
+    T --> ACC["accuracy over all items,<br/>bootstrap 1000"]
+    T --> MF["macro_f1 over 6 labels,<br/>invalid is a false negative,<br/>bootstrap 1000"]
+    T --> WF["weighted_f1, per_class"]
+    T --> INV["invalid_rate"]
+    T --> CM["confusion: 6 × 7"]
+    ACC --> OUT[/"metrics.json and report.md"/]
+    MF --> OUT
+    WF --> OUT
+    INV --> OUT
+    CM --> OUT
+```
+
 | Metric | Rule |
 |---|---|
 | `accuracy` | Correct predictions over all items, with a 95% bootstrap interval (1000 resamples) |
@@ -318,6 +617,23 @@ flowchart TB
 | `confusion` | 6 rows (true labels) × 7 columns (six labels and `invalid`) |
 
 **Comparisons.**
+
+```mermaid
+flowchart TD
+    A[/"run_a and run_b folders"/] --> LP["load_predictions"]
+    LP --> SAME{"Same texts in<br/>the same order?"}
+    SAME -- "no" --> X1[/"exit"/]
+    SAME -- "yes" --> CMD{"command"}
+    CMD -- "compare" --> LBL{"All rows labelled?"}
+    LBL -- "no" --> X2[/"exit: use agreement"/]
+    LBL -- "yes" --> KIND{"Both configs<br/>have a model?"}
+    CMP["metrics.compare: accuracy difference,<br/>paired bootstrap 2000, exact McNemar"]
+    KIND -- "no" --> CMP
+    KIND -- "yes" --> LFL{"check_like_for_like:<br/>one kind only?"}
+    LFL -- "no" --> X3[/"ValueError"/]
+    LFL -- "yes" --> CMP
+    CMD -- "agreement" --> AGR["metrics.agreement: agreement rate,<br/>Cohen's kappa, invalid rates"]
+```
 
 | Command | Needs | Gives |
 |---|---|---|
@@ -398,13 +714,38 @@ emotune predict --input data/youtube/comments.csv --backend hf-score --model lla
 emotune label-sample --comments data/youtube/comments.csv --n 300 --out data/youtube/to_label.csv
 ```
 
+The diagram shows the order of the commands and the files that connect them.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> DEMO["emotune demo"]
+    INS --> DL["emotune download<br/>--revision hash"]
+    INS --> SYN["emotune synth"]
+    DL --> CSV[("data/emotion/*.csv")]
+    SYN --> CSV2[("data/synthetic/*.csv")]
+    CSV --> BASE["emotune baseline"]
+    CSV2 -- "--data" --> BASE
+    CSV --> LLM["emotune llm"]
+    CSV --> FT["emotune finetune"]
+    FT --> AD[("runs/lora_model/adapter/")]
+    AD -- "--adapter" --> LLM
+    BASE --> RUNS[("runs/name/")]
+    LLM --> RUNS
+    RUNS --> CMP["emotune compare"]
+    YT["emotune collect-youtube"] --> COM[("data/youtube/comments.csv")]
+    COM --> PRED["emotune predict"]
+    AD -- "--adapter" --> PRED
+    PRED --> RUNS
+    COM --> LS["emotune label-sample"]
+```
+
 ### 10.4 Environment variables
 
 | Variable | Used by | Meaning |
 |---|---|---|
 | `EMOTUNE_DATA_DIR` | data commands | Data folder. Default `data/emotion` |
-| `EMOTUNE_RUNS_DIR` | all commands with output | Run folder. Default `runs` |
-| `EMOTUNE_SEED` | all | Seed of the sampler, the baselines and training. Default `0` |
+| `EMOTUNE_RUNS_DIR` | `baseline`, `llm`, `finetune`, `predict` | Run folder. Default `runs`. `demo` writes to a temporary folder or to `--out-dir` |
+| `EMOTUNE_SEED` | `baseline`, `llm`, `finetune`, `predict` | Seed of the sampler, the baselines, the chat models and training. Default `0`. `synth`, `demo` and `label-sample` use their `--seed` argument |
 | `EMOTUNE_LLM_BASE_URL` | `--backend openai` | Default `https://api.openai.com/v1` |
 | `EMOTUNE_LLM_MODEL` | `--backend openai` | Default `gpt-4o-mini` |
 | `EMOTUNE_LLM_API_KEY` | `--backend openai` | Endpoint key |
@@ -413,6 +754,17 @@ emotune label-sample --comments data/youtube/comments.csv --n 300 --out data/you
 | `EMOTUNE_HASH_SALT` | `collect-youtube` | Salt of the comment id hash |
 
 Credentials are only in a local `.env` file. Git ignores this file. Do not print or commit credentials.
+
+```mermaid
+flowchart LR
+    DOT[/".env file"/] --> LD["load_dotenv: sets only known names<br/>that are not set already"]
+    ENV[/"process environment"/] --> SE["settings_from_env"]
+    LD --> SE
+    SE --> V{"Settings valid?<br/>pydantic"}
+    V -- "no" --> ERR[/"ValidationError"/]
+    V -- "yes" --> SET[/"Settings: data_dir, runs_dir, seed,<br/>LLM, HF and YouTube values"/]
+    ENV --> HFL["hf.load reads HF_TOKEN"]
+```
 
 ---
 
